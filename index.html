@@ -19,7 +19,11 @@
     --text:#f5f0ff;
     --text-dim:#b9a9e6;
   }
-  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  *{
+    box-sizing:border-box;-webkit-tap-highlight-color:transparent;
+    -webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none;
+    -webkit-touch-callout:none;
+  }
   html,body{
     margin:0;padding:0;height:100%;overflow:hidden;
     background:var(--bg-deep);
@@ -27,6 +31,7 @@
     color:var(--text);
     touch-action:none;
     overscroll-behavior:none;
+    -webkit-user-drag:none;
   }
   #app{
     position:fixed;inset:0;
@@ -46,6 +51,10 @@
   }
 
   /* ---- HUD ---- */
+  input, textarea{
+    -webkit-user-select:text;-moz-user-select:text;-ms-user-select:text;user-select:text;
+    -webkit-touch-callout:default;
+  }
   #hud{
     position:absolute;top:0;left:0;right:0;
     display:flex;justify-content:space-between;align-items:flex-start;
@@ -710,6 +719,17 @@
     dragging = false;
   }
   canvas.addEventListener('pointerdown', onDown);
+  // extra safety net: some mobile browsers still show a selection/callout
+  // popup on long-press even with CSS user-select:none, so block it explicitly
+  document.addEventListener('contextmenu', (e) => {
+    const tag = e.target.tagName;
+    if(tag !== 'INPUT' && tag !== 'TEXTAREA') e.preventDefault();
+  });
+  document.addEventListener('selectstart', (e) => {
+    const tag = e.target.tagName;
+    if(tag !== 'INPUT' && tag !== 'TEXTAREA') e.preventDefault();
+  });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   canvas.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
   window.addEventListener('keydown', (e)=>{
