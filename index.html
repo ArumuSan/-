@@ -83,6 +83,16 @@
     text-align:right;
   }
   #best-chip .lbl{font-size:9px;color:var(--text-dim);display:block;margin-bottom:4px;letter-spacing:2px;}
+  #hp-chip{
+    background:rgba(21,10,46,.55);
+    border:1px solid rgba(255,90,120,.4);
+    border-radius:8px;
+    padding:8px 10px;
+    text-align:center;
+  }
+  #hp-chip .lbl{font-size:9px;color:var(--text-dim);display:block;margin-bottom:4px;letter-spacing:2px;}
+  #hp-chip .hearts{font-size:16px;letter-spacing:2px;}
+  #hp-chip .heart-lost{opacity:.25;filter:grayscale(1);}
 
   /* ---- Overlays ---- */
   .overlay{
@@ -274,6 +284,7 @@
 
     <div id="hud">
       <div class="led"><span class="lbl">SCORE</span><span id="score-val">0</span><span style="font-size:11px;">m</span></div>
+      <div id="hp-chip"><span class="lbl">HP</span><span class="hearts" id="hp-hearts">❤️❤️❤️</span></div>
       <div id="best-chip"><span class="lbl">BEST</span><span id="best-val">0</span><span style="font-size:9px;">m</span></div>
     </div>
 
@@ -596,6 +607,9 @@
   let bgOffset = 0;
   let flashTimer = 0;
   let sparkleTimer = 0;
+  const MAX_HP = 3;
+  let hp = MAX_HP;
+  let invulnTimer = 0;
 
   function resetGame(){
     player = {
@@ -613,6 +627,29 @@
     fallY0 = null;
     flashTimer = 0;
     sparkleTimer = 0;
+    hp = MAX_HP;
+    invulnTimer = 0;
+    updateHpUI();
+  }
+
+  function updateHpUI(){
+    let s = '';
+    for(let i=0;i<MAX_HP;i++){
+      s += (i < hp) ? '❤️' : '<span class="heart-lost">❤️</span>';
+    }
+    hpHeartsEl.innerHTML = s;
+  }
+
+  function takeDamage(){
+    if(invulnTimer > 0 || state !== 'playing') return;
+    hp -= 1;
+    invulnTimer = 1.2;
+    flashTimer = 0.4;
+    updateHpUI();
+    spawnParticles(player.x+player.w/2, player.y+player.h/2, 14, 'hit');
+    if(hp <= 0){
+      triggerGameOver();
+    }
   }
 
   function currentScore(){
@@ -675,9 +712,6 @@
   canvas.addEventListener('pointerdown', onDown);
   canvas.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
-  canvas.addEventListener('touchstart', onDown, {passive:false});
-  canvas.addEventListener('touchmove', onMove, {passive:false});
-  window.addEventListener('touchend', onUp);
   window.addEventListener('keydown', (e)=>{
     if(e.code === 'Space' || e.code === 'ArrowUp'){ e.preventDefault(); if(state==='start'){beginGame();} else {jump();} }
     if(e.code === 'ArrowLeft'){ targetX -= 40; }
@@ -793,11 +827,23 @@
         player.x + PIT_FORGIVENESS < o.x + o.w);
 
       if(player.falling){
-        // already committed to falling through a pit: never snap back onto the ground
+        // already committed to falling through a pit
         player.grounded = false;
         if(player.y > H + 100){
-          triggerGameOver();
-          return;
+          takeDamage();
+          if(state !== 'playing') return;
+          // survived: climb back out just past the pit that caused the fall, briefly invulnerable
+          player.falling = false;
+          player.grounded = true;
+          player.vy = 0;
+          player.y = groundY - player.h;
+          player.jumpsUsed = 0;
+          for(const o of obstacles){
+            if(o.type === 'pit' && player.x + player.w > o.x && player.x < o.x + o.w){
+              player.x = o.x + o.w + 14;
+            }
+          }
+          targetX = Math.max(targetX, player.x);
         }
       } else if(overPit && player.y + player.h >= groundY - 2){
         // contacted the pit (even just its wall) while at ground level: commit to falling, no recovery
@@ -853,8 +899,9 @@
 
         if(o.type !== 'pit'){
           if(rectsOverlap(player, o)){
-            triggerGameOver();
-            return;
+            takeDamage();
+            obstacles.splice(i,1);
+            if(state !== 'playing') return;
           }
         }
       }
@@ -879,6 +926,7 @@
     }
 
     if(flashTimer > 0) flashTimer -= dt;
+    if(invulnTimer > 0) invulnTimer -= dt;
   }
 
   function rectsOverlap(a,b){
@@ -1038,6 +1086,8 @@
   }
 
   function drawPlayer(){
+    // brief flicker while invulnerable right after taking a hit
+    if(invulnTimer > 0 && Math.floor(invulnTimer * 14) % 2 === 0) return;
     ctx.save();
     const squash = Math.max(0, player.squash)/6;
     const cx = player.x + player.w/2;
@@ -1165,6 +1215,7 @@
   const finalScoreEl = document.getElementById('final-score');
   const newbestTag = document.getElementById('newbest-tag');
   const bestValEl = document.getElementById('best-val');
+  const hpHeartsEl = document.getElementById('hp-hearts');
 
   let lastRunScore = 0;
   let lastRunTs = null;
