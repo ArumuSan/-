@@ -305,6 +305,7 @@
         <div class="howto">
           <div><span class="ic">👆</span><b>タップ</b>ジャンプ（2段まで）</div>
           <div><span class="ic">↔️</span><b>スライド</b>横移動</div>
+          <div><span class="ic">⬇️</span><b>下スワイプ</b>すぐ着地</div>
           <div><span class="ic">💔</span><b>接触で</b>ダメージ（HP0でゲームオーバー）</div>
         </div>
         <button class="btn btn-primary" id="start-btn">タップしてスタート</button>
@@ -612,10 +613,20 @@
   const MANEUVER_TIME = 0.6;
   const SAFETY_LEAD_TIME = REACT_TIME + MANEUVER_TIME;
 
+  // how far right the player is allowed to drag, as a fraction of screen width.
+  // Shared by the movement clamp and the fairness-speed calculation below so
+  // that giving the player more room to move never quietly breaks the 0.4s
+  // reaction guarantee.
+  const DRAG_MAX_FRAC = 0.85;
+
   function fairMaxSpeed(){
-    const maxX = W*0.72 - PLAYER_W;
+    const maxX = W*DRAG_MAX_FRAC - PLAYER_W;
     const visibleGap = Math.max(40, W - maxX);
-    return visibleGap / SAFETY_LEAD_TIME;
+    // the on-screen "⚠ コーチが来る！" warning (see GROUND_WARN_LEAD below) already
+    // guarantees advance notice independent of screen width, so only the
+    // remaining part of the safety budget needs to come from visible runway
+    const remaining = Math.max(0.15, SAFETY_LEAD_TIME - GROUND_WARN_LEAD);
+    return visibleGap / remaining;
   }
 
   // stage target speeds: stage 0-2 ramp up gently, stage 3 (coach appears) is
@@ -638,6 +649,8 @@
   let dragging = false;
   let targetX = 0;
   let dragLastX = 0;
+  let dragStartY = 0;
+  let fastFallArmed = false;
   let fallY0 = null;
   let bgOffset = 0;
   let flashTimer = 0;
@@ -646,6 +659,7 @@
   let hp = MAX_HP;
   let invulnTimer = 0;
   let pendingGroundWarning = 0;
+  let fallTimer = 0;
   const GROUND_WARN_LEAD = 0.85; // seconds of guaranteed advance notice before a coach obstacle appears,
                                   // independent of screen width, so tapping within 0.4s of noticing it
                                   // still leaves enough time for a (double) jump to clear it
@@ -669,6 +683,7 @@
     hp = MAX_HP;
     invulnTimer = 0;
     pendingGroundWarning = 0;
+    fallTimer = 0;
     updateHpUI();
   }
 
@@ -722,6 +737,16 @@
       spawnParticles(player.x + player.w/2, player.y + player.h, 8, 'jump');
     }
   }
+  const FAST_FALL_SPEED = 1500; // px/s
+  function fastFall(){
+    // press "down" to drop and land immediately, whether mid-jump or mid-pit-fall.
+    // This is purely a velocity boost, so all the normal landing/pit-detection
+    // logic still runs as usual — it just gets there faster. This also doubles
+    // as a manual escape hatch: if a pit fall were ever to feel stuck, pressing
+    // down speeds it straight to the safety-net recovery.
+    if(state !== 'playing' || player.grounded) return;
+    player.vy = Math.max(player.vy, FAST_FALL_SPEED);
+  }
   function pointerToLocal(e){
     const r = canvas.getBoundingClientRect();
     const cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
@@ -736,6 +761,8 @@
     const p = pointerToLocal(e);
     dragging = true;
     dragLastX = p.x;
+    dragStartY = p.y;
+    fastFallArmed = true;
     // capture the pointer so drag/slide keeps working even if the cursor moves
     // outside the canvas element (common on PC when dragging quickly to the
     // right) — without this, pointermove stops firing once the cursor leaves
@@ -750,6 +777,11 @@
     const delta = p.x - dragLastX;
     targetX += delta;
     dragLastX = p.x;
+    // downward swipe: once per touch, fast-fall (drop and land immediately)
+    if(fastFallArmed && p.y - dragStartY > 45){
+      fastFallArmed = false;
+      fastFall();
+    }
   }
   function onUp(e){
     dragging = false;
@@ -773,6 +805,7 @@
     if(e.code === 'Space' || e.code === 'ArrowUp'){ e.preventDefault(); if(state==='start'){beginGame();} else {jump();} }
     if(e.code === 'ArrowLeft'){ targetX -= 40; }
     if(e.code === 'ArrowRight'){ targetX += 40; }
+    if(e.code === 'ArrowDown'){ e.preventDefault(); fastFall(); }
   });
 
   // ---------------------------------------------------------------
@@ -818,7 +851,7 @@
   function spawnPit(){
     const w = 90 + Math.random()*70 + Math.min(currentScore()*0.05, 60);
     obstacles.push({
-      type:'pit', x: W + 40, y: groundY, w: w, h: H - groundY
+      type:'pit', x: W + 40, w: w
     });
   }
   function spawnFlyer(){
@@ -877,7 +910,7 @@
       bgOffset += scrollSpeed * dt * 0.5;
 
       // horizontal move (smooth)
-      const minX = 10, maxX = W*0.72 - player.w;
+      const minX = 10, maxX = W*DRAG_MAX_FRAC - player.w;
       targetX = Math.max(minX, Math.min(maxX, targetX));
       player.x += (targetX - player.x) * Math.min(1, dt*3.2);
 
@@ -885,19 +918,21 @@
       player.vy += GRAVITY * dt;
       player.y += player.vy * dt;
 
-      // require the character to be solidly over the pit before committing to a
-      // fall — but only forgive true pixel-level edge grazing, not a big chunk of
-      // the body, otherwise the player visibly clips through the pit's wall while
-      // "standing" on nothing.
-      const PIT_FORGIVENESS = 8;
+      // commit to falling only once the player's CENTER is over the pit —
+      // simpler and far less prone to edge-case bugs than a pixel-margin
+      // "forgiveness" check, and it naturally ignores mere edge-grazing.
+      const centerX = player.x + player.w/2;
       const overPit = obstacles.some(o => o.type==='pit' &&
-        player.x + player.w - PIT_FORGIVENESS > o.x &&
-        player.x + PIT_FORGIVENESS < o.x + o.w);
+        centerX > o.x && centerX < o.x + o.w);
 
       if(player.falling){
         // already committed to falling through a pit
         player.grounded = false;
-        if(player.y > H + 100){
+        fallTimer += dt;
+        // land as soon as we scroll off the bottom of the screen, OR after a
+        // safety-net timeout — this guarantees the player can never get
+        // stuck in a "falling forever, ground never comes back" state
+        if(player.y > H + 100 || fallTimer > 1.6){
           takeDamage();
           if(state !== 'playing') return;
           // survived: climb back out right where we are and resume normal ground
@@ -910,13 +945,15 @@
           player.vy = 0;
           player.y = groundY - player.h;
           player.jumpsUsed = 0;
+          fallTimer = 0;
         }
       } else if(overPit && player.y + player.h >= groundY - 2){
-        // contacted the pit (even just its wall) while at ground level: commit to
-        // falling, and remove the pit(s) right away so no stale reference to a
-        // long-gone, off-screen obstacle can corrupt ground detection later.
+        // contacted the pit while at ground level: commit to falling, and
+        // remove the pit(s) right away so no stale reference to a long-gone,
+        // off-screen obstacle can corrupt ground detection later.
         player.falling = true;
         player.grounded = false;
+        fallTimer = 0;
         for(let j = obstacles.length-1; j>=0; j--){
           const p = obstacles[j];
           if(p.type === 'pit' && player.x + player.w > p.x && player.x < p.x + p.w){
@@ -1240,26 +1277,30 @@
         ctx.fill();
       }
     } else if(o.type === 'pit'){
-      // dark void, clearly distinct from the light floor
+      // dark void, clearly distinct from the light floor. Always drawn against
+      // the CURRENT ground level (not a value cached at spawn time), so it
+      // can't drift out of alignment if the viewport height changes mid-game
+      // (common on mobile when the browser's address bar shows/hides).
+      const py = groundY, ph = H - groundY;
       ctx.fillStyle = '#08050f';
-      ctx.fillRect(o.x, o.y, o.w, o.h);
+      ctx.fillRect(o.x, py, o.w, ph);
       // hazard stripe strip along the top edge for visibility
       const stripeH = 7;
       ctx.save();
       ctx.beginPath();
-      ctx.rect(o.x, o.y, o.w, stripeH);
+      ctx.rect(o.x, py, o.w, stripeH);
       ctx.clip();
       ctx.fillStyle = '#1a1206';
-      ctx.fillRect(o.x, o.y, o.w, stripeH);
+      ctx.fillRect(o.x, py, o.w, stripeH);
       ctx.fillStyle = '#ffcc33';
       const stripeW = 12;
       const sOff = (elapsed*40) % (stripeW*2);
       for(let sx = o.x - stripeW*2 + sOff; sx < o.x+o.w+stripeW; sx += stripeW*2){
         ctx.beginPath();
-        ctx.moveTo(sx, o.y+stripeH);
-        ctx.lineTo(sx+stripeW, o.y+stripeH);
-        ctx.lineTo(sx+stripeW*2, o.y);
-        ctx.lineTo(sx+stripeW, o.y);
+        ctx.moveTo(sx, py+stripeH);
+        ctx.lineTo(sx+stripeW, py+stripeH);
+        ctx.lineTo(sx+stripeW*2, py);
+        ctx.lineTo(sx+stripeW, py);
         ctx.closePath();
         ctx.fill();
       }
@@ -1267,7 +1308,7 @@
       ctx.strokeStyle = 'rgba(255,46,136,0.7)';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(o.x,o.y+0.5); ctx.lineTo(o.x+o.w,o.y+0.5);
+      ctx.moveTo(o.x,py+0.5); ctx.lineTo(o.x+o.w,py+0.5);
       ctx.stroke();
     } else if(o.type === 'flyer'){
       const wob = Math.sin(elapsed*10)*4;
